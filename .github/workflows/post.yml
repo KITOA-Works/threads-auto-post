@@ -1,0 +1,34 @@
+name: Threads auto post
+
+on:
+  schedule:
+    # JST 8:00 / 12:00 / 20:00 (cron は UTC 指定)
+    - cron: "0 23 * * *"
+    - cron: "0 3 * * *"
+    - cron: "0 11 * * *"
+  workflow_dispatch:
+    inputs:
+      post_index:
+        description: "投稿番号を指定する場合(0始まり)。空なら日付から自動"
+        required: false
+        default: ""
+      dry_run:
+        description: "1 なら投稿せず文面だけ表示"
+        required: false
+        default: "0"
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Post to Threads
+        env:
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+          POST_INDEX: ${{ github.event.inputs.post_index }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: python post.py
