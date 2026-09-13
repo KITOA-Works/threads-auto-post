@@ -81,15 +81,17 @@ def main():
     print(text)
     print("-" * 40)
 
-    for marker in PLACEHOLDER_MARKERS:
-        if marker in text:
-            raise SystemExit(f"未記入の箇所({marker})があるので投稿を中止しました")
+    problems = [f"未記入の箇所({m})があります" for m in PLACEHOLDER_MARKERS if m in text]
     if len(text) > 500:
-        raise SystemExit(f"本文が500文字を超えています({len(text)}文字)")
+        problems.append(f"本文が500文字を超えています({len(text)}文字)")
 
     if dry_run:
+        for p in problems:
+            print(f"警告: {p}")
         print("DRY_RUN=1 のため投稿しません")
         return
+    if problems:
+        raise SystemExit("投稿を中止しました: " + " / ".join(problems))
     if not token or not user_id:
         raise SystemExit("THREADS_ACCESS_TOKEN / THREADS_USER_ID が設定されていません")
 
