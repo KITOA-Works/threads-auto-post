@@ -1,6 +1,7 @@
 """Threads 自動投稿スクリプト(GitHub Actions から1日3回呼ばれる)
 
 - posts.json の投稿を、日付とスロット(朝/昼/夜)から決めた順番で1件投稿する
+- 本文(リンクなし)を投稿 → その投稿に自分でリプライしてリンク+開示文を付ける(2段階)
 - 状態ファイルは持たない(順番は日付から計算するので、どの実行環境でも同じ結果になる)
 - 標準ライブラリのみ使用(pip 不要)
 
@@ -40,6 +41,20 @@ def api(method, path, params):
         raise SystemExit(f"API error {e.code} on {path}: {body}")
 
 
+def publish_text(user_id, token, text, reply_to_id=None):
+    """テキスト投稿(またはリプライ)を作成して公開し、media id を返す"""
+    params = {"media_type": "TEXT", "text": text, "access_token": token}
+    if reply_to_id:
+        params["reply_to_id"] = reply_to_id
+    created = api("POST", f"{user_id}/threads", params)
+    time.sleep(5)  # コンテナ処理待ち(公式推奨)
+    published = api("POST", f"{user_id}/threads_publish", {
+        "creation_id": created["id"],
+        "access_token": token,
+    })
+    return published["id"]
+
+
 def choose_index(cfg, posts, now):
     """日付とスロットから posts の番号を決める(0始まり)。"""
     start = datetime.strptime(cfg["start_date"], "%Y-%m-%d").date()
@@ -53,6 +68,21 @@ def choose_index(cfg, posts, now):
         slot = 2  # 夜
     per_day = cfg.get("posts_per_day", 3)
     return (max(days, 0) * per_day + slot) % len(posts)
+
+
+def build_texts(cfg, post):
+    """(本文, リプライ文) を返す。リプライ文が無い旧形式(本文にリンク入り)にも対応"""
+    body = post["text"].rstrip()
+    disclosure = cfg.get("disclosure", "")
+    reply = (post.get("reply") or "").rstrip()
+    if reply:
+        if disclosure and disclosure not in reply:
+            reply = f"{reply}\n\n{disclosure}"
+        return body, reply
+    # 旧形式: 本文にリンクと開示文をまとめる
+    if disclosure and disclosure not in body:
+        body = f"{body}\n\n{disclosure}"
+    return body, ""
 
 
 def main():
@@ -70,20 +100,21 @@ def main():
     forced = os.environ.get("POST_INDEX")
     idx = int(forced) if forced not in (None, "") else choose_index(cfg, posts, now)
     post = posts[idx % len(posts)]
-
-    text = post["text"].rstrip()
-    disclosure = cfg.get("disclosure", "")
-    if disclosure and disclosure not in text:
-        text = f"{text}\n\n{disclosure}"
+    body, reply = build_texts(cfg, post)
 
     print(f"[{now:%Y-%m-%d %H:%M} JST] index={idx} / {len(posts)}")
-    print("-" * 40)
-    print(text)
-    print("-" * 40)
+    print("---- 本文 ----")
+    print(body)
+    if reply:
+        print("---- リプライ ----")
+        print(reply)
+    print("--------------")
 
-    problems = [f"未記入の箇所({m})があります" for m in PLACEHOLDER_MARKERS if m in text]
-    if len(text) > 500:
-        problems.append(f"本文が500文字を超えています({len(text)}文字)")
+    problems = []
+    for label, t in (("本文", body), ("リプライ", reply)):
+        problems += [f"{label}に未記入の箇所({m})があります" for m in PLACEHOLDER_MARKERS if m in t]
+        if len(t) > 500:
+            problems.append(f"{label}が500文字を超えています({len(t)}文字)")
 
     if dry_run:
         for p in problems:
@@ -95,18 +126,14 @@ def main():
     if not token or not user_id:
         raise SystemExit("THREADS_ACCESS_TOKEN / THREADS_USER_ID が設定されていません")
 
-    created = api("POST", f"{user_id}/threads", {
-        "media_type": "TEXT",
-        "text": text,
-        "access_token": token,
-    })
-    time.sleep(5)  # コンテナ処理待ち(公式推奨)
-    published = api("POST", f"{user_id}/threads_publish", {
-        "creation_id": created["id"],
-        "access_token": token,
-    })
-    info = api("GET", published["id"], {"fields": "permalink", "access_token": token})
-    print(f"投稿しました: {info.get('permalink', published['id'])}")
+    main_id = publish_text(user_id, token, body)
+    info = api("GET", main_id, {"fields": "permalink", "access_token": token})
+    print(f"投稿しました: {info.get('permalink', main_id)}")
+
+    if reply:
+        time.sleep(3)
+        reply_id = publish_text(user_id, token, reply, reply_to_id=main_id)
+        print(f"リンクをリプライしました: id={reply_id}")
 
 
 if __name__ == "__main__":
