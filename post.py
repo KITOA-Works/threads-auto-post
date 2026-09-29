@@ -79,6 +79,9 @@ def build_texts(cfg, post):
         if disclosure and disclosure not in reply:
             reply = f"{reply}\n\n{disclosure}"
         return body, reply
+    # リンクを貼らない雑談投稿には開示文を付けない(広告ではないため)
+    if "amazon.co.jp" not in body:
+        return body, ""
     # 旧形式: 本文にリンクと開示文をまとめる
     if disclosure and disclosure not in body:
         body = f"{body}\n\n{disclosure}"
