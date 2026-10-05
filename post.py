@@ -55,19 +55,42 @@ def publish_text(user_id, token, text, reply_to_id=None):
     return published["id"]
 
 
+def slot_of(hour):
+    """JSTの時刻から枠を決める。深夜(0〜6時)は「どの枠でもない」= None。
+
+    GitHub Actions の定時実行は遅延・スキップされることがあり、遅れて日付を
+    またぐと翌日の番号を投稿してしまう(実際 10/5 02:20 に起きた)。
+    深夜の実行は投稿しないことで、それを防ぐ。
+    """
+    if 6 <= hour < 11:
+        return 0  # 朝
+    if 11 <= hour < 16:
+        return 1  # 昼
+    if 16 <= hour < 24:
+        return 2  # 夜
+    return None
+
+
 def choose_index(cfg, posts, now):
-    """日付とスロットから posts の番号を決める(0始まり)。"""
+    """日付とスロットから posts の番号を決める(0始まり)。深夜なら None。"""
+    slot = slot_of(now.hour)
+    if slot is None:
+        return None
     start = datetime.strptime(cfg["start_date"], "%Y-%m-%d").date()
     days = (now.date() - start).days
-    hour = now.hour
-    if hour < 10:
-        slot = 0  # 朝
-    elif hour < 16:
-        slot = 1  # 昼
-    else:
-        slot = 2  # 夜
     per_day = cfg.get("posts_per_day", 3)
     return (max(days, 0) * per_day + slot) % len(posts)
+
+
+def recent_texts(user_id, token, limit=6):
+    """直近の自分の投稿の本文を取得する(重複投稿の検出用)"""
+    try:
+        data = api("GET", f"{user_id}/threads", {
+            "fields": "text", "limit": limit, "access_token": token,
+        })
+        return [(m.get("text") or "").strip() for m in data.get("data", [])]
+    except SystemExit:
+        return []  # 取得できなくても投稿そのものは止めない
 
 
 def build_texts(cfg, post):
@@ -101,7 +124,13 @@ def main():
 
     now = datetime.now(JST)
     forced = os.environ.get("POST_INDEX")
-    idx = int(forced) if forced not in (None, "") else choose_index(cfg, posts, now)
+    if forced not in (None, ""):
+        idx = int(forced)
+    else:
+        idx = choose_index(cfg, posts, now)
+        if idx is None:
+            print(f"[{now:%Y-%m-%d %H:%M} JST] 深夜の実行のため投稿しません(定時実行の遅延とみなす)")
+            return
     post = posts[idx % len(posts)]
     body, reply = build_texts(cfg, post)
 
@@ -128,6 +157,11 @@ def main():
         raise SystemExit("投稿を中止しました: " + " / ".join(problems))
     if not token or not user_id:
         raise SystemExit("THREADS_ACCESS_TOKEN / THREADS_USER_ID が設定されていません")
+
+    # 直近の投稿と同じ本文なら投稿しない(定時実行の遅延・二重起動による重複を防ぐ)
+    if body.strip() in recent_texts(user_id, token):
+        print("直近に同じ本文を投稿済みのため、今回はスキップします")
+        return
 
     main_id = publish_text(user_id, token, body)
     info = api("GET", main_id, {"fields": "permalink", "access_token": token})
