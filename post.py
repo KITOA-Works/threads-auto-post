@@ -72,14 +72,22 @@ def slot_of(hour):
 
 
 def choose_index(cfg, posts, now):
-    """日付とスロットから posts の番号を決める(0始まり)。深夜なら None。"""
+    """日付とスロットから posts の番号を決める(0始まり)。
+
+    深夜は None。リストを一周して使い切っていたら "exhausted" を返す。
+    一周すると同じ本文をもう一度投稿することになり、読み手からは
+    「同じ投稿が繰り返される」状態に見えるため、投稿せずに止める。
+    """
     slot = slot_of(now.hour)
     if slot is None:
         return None
     start = datetime.strptime(cfg["start_date"], "%Y-%m-%d").date()
     days = (now.date() - start).days
     per_day = cfg.get("posts_per_day", 3)
-    return (max(days, 0) * per_day + slot) % len(posts)
+    n = max(days, 0) * per_day + slot
+    if n >= len(posts):
+        return "exhausted"
+    return n
 
 
 def recent_texts(user_id, token, limit=6):
@@ -131,6 +139,11 @@ def main():
         if idx is None:
             print(f"[{now:%Y-%m-%d %H:%M} JST] 深夜の実行のため投稿しません(定時実行の遅延とみなす)")
             return
+        if idx == "exhausted":
+            raise SystemExit(
+                f"posts.json({len(posts)}件)を使い切りました。同じ投稿の繰り返しを防ぐため投稿しません。"
+                " 新しい posts.json をアップロードしてください"
+            )
     post = posts[idx % len(posts)]
     body, reply = build_texts(cfg, post)
 
