@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 API = "https://graph.threads.net/v1.0"
 JST = timezone(timedelta(hours=9))
 PLACEHOLDER_MARKERS = ("【リンク】", "【商品名】", "https://amzn.to/xxxx")
+MIN_GAP_HOURS = 4  # 前の投稿からこれだけ空ける(連投はスパム判定されやすい)
 
 
 def api(method, path, params):
@@ -71,34 +72,48 @@ def slot_of(hour):
     return None
 
 
-def choose_index(cfg, posts, now):
-    """日付とスロットから posts の番号を決める(0始まり)。
-
-    深夜は None。リストを一周して使い切っていたら "exhausted" を返す。
-    一周すると同じ本文をもう一度投稿することになり、読み手からは
-    「同じ投稿が繰り返される」状態に見えるため、投稿せずに止める。
-    """
-    slot = slot_of(now.hour)
-    if slot is None:
+def recent_posts(user_id, token, limit=12):
+    """直近の自分の投稿(本文と投稿時刻)を取得する。取れなければ None"""
+    try:
+        data = api("GET", f"{user_id}/threads", {
+            "fields": "text,timestamp", "limit": limit, "access_token": token,
+        })
+    except SystemExit:
         return None
-    start = datetime.strptime(cfg["start_date"], "%Y-%m-%d").date()
-    days = (now.date() - start).days
+    out = []
+    for m in data.get("data", []):
+        ts = datetime.fromisoformat(m["timestamp"].replace("+0000", "+00:00")).astimezone(JST)
+        out.append((ts, (m.get("text") or "").strip()))
+    return out
+
+
+def choose_index(cfg, posts, now, recent):
+    """posts の番号を決める(0始まり)。
+
+    時刻の「枠」ではなく、**今日すでに何件投稿したか**で決める。
+    GitHub Actions の定時実行は数時間ずれることがあり、枠で決めていると
+    昼の実行が夜の枠に流れ込んで1日2回に減ってしまうため(10/15〜実際に発生)。
+
+    戻り値: 番号 / None(今は投稿しない) / "exhausted"(リストを使い切り)
+    """
     per_day = cfg.get("posts_per_day", 3)
-    n = max(days, 0) * per_day + slot
+    if slot_of(now.hour) is None:
+        return None  # 深夜は投稿しない
+    if recent is None:
+        return None  # 投稿済み件数が確認できないときは、重複を避けて投稿しない
+
+    today = [t for t, _ in recent if t.date() == now.date()]
+    if len(today) >= per_day:
+        return None  # 今日の分は投稿済み
+    if today and (now - max(today)).total_seconds() < MIN_GAP_HOURS * 3600:
+        return None  # 連投を避ける(短時間に続けて出すとスパム扱いされやすい)
+
+    start = datetime.strptime(cfg["start_date"], "%Y-%m-%d").date()
+    days = max((now.date() - start).days, 0)
+    n = days * per_day + len(today)
     if n >= len(posts):
         return "exhausted"
     return n
-
-
-def recent_texts(user_id, token, limit=6):
-    """直近の自分の投稿の本文を取得する(重複投稿の検出用)"""
-    try:
-        data = api("GET", f"{user_id}/threads", {
-            "fields": "text", "limit": limit, "access_token": token,
-        })
-        return [(m.get("text") or "").strip() for m in data.get("data", [])]
-    except SystemExit:
-        return []  # 取得できなくても投稿そのものは止めない
 
 
 def build_texts(cfg, post):
@@ -131,13 +146,15 @@ def main():
         raise SystemExit("posts.json に投稿がありません")
 
     now = datetime.now(JST)
+    recent = recent_posts(user_id, token) if (token and user_id) else None
     forced = os.environ.get("POST_INDEX")
     if forced not in (None, ""):
         idx = int(forced)
     else:
-        idx = choose_index(cfg, posts, now)
+        idx = choose_index(cfg, posts, now, recent)
         if idx is None:
-            print(f"[{now:%Y-%m-%d %H:%M} JST] 深夜の実行のため投稿しません(定時実行の遅延とみなす)")
+            print(f"[{now:%Y-%m-%d %H:%M} JST] 今回は投稿しません"
+                  "(深夜 / 今日の分は投稿済み / 前の投稿から時間が空いていない のいずれか)")
             return
         if idx == "exhausted":
             raise SystemExit(
@@ -172,7 +189,7 @@ def main():
         raise SystemExit("THREADS_ACCESS_TOKEN / THREADS_USER_ID が設定されていません")
 
     # 直近の投稿と同じ本文なら投稿しない(定時実行の遅延・二重起動による重複を防ぐ)
-    if body.strip() in recent_texts(user_id, token):
+    if body.strip() in [t for _, t in (recent or [])]:
         print("直近に同じ本文を投稿済みのため、今回はスキップします")
         return
 
