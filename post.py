@@ -202,6 +202,33 @@ def main():
         reply_id = publish_text(user_id, token, reply, reply_to_id=main_id)
         print(f"リンクをリプライしました: id={reply_id}")
 
+    warn_early(cfg, posts, idx, now)
+
+
+def warn_early(cfg, posts, idx, now):
+    """在庫切れ・トークン失効が近づいたら、投稿したうえでワークフローを失敗させる。
+
+    失敗させるとGitHubから通知メールが届く。投稿自体は終わっているので実害はなく、
+    「気づかないまま止まっていた」(2026-11、11日間停止)を防ぐのが目的。
+    """
+    warnings = []
+    per_day = cfg.get("posts_per_day", 2)
+    left = len(posts) - (idx + 1)
+    if left <= per_day * 3:
+        warnings.append(f"投稿リストの残りが{left}件({left / per_day:.1f}日分)です。新しい posts.json を用意してください")
+
+    exp = cfg.get("token_expires_at")
+    if exp:
+        try:
+            days = (datetime.fromisoformat(exp) - now).days
+            if days <= 14:
+                warnings.append(f"アクセストークンの残り日数が{days}日です。再取得して GitHub Secrets を更新してください")
+        except ValueError:
+            pass
+
+    if warnings:
+        raise SystemExit("投稿は完了しています。以下の準備をしてください → " + " / ".join(warnings))
+
 
 if __name__ == "__main__":
     sys.exit(main())
