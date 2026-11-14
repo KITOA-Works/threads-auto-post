@@ -56,13 +56,28 @@ def views_of(media_id, token):
     return None
 
 
-def already_replied(media_id, token, me):
-    """その投稿に自分の返信が付いているか"""
+STATE = "harvested.json"
+
+
+def load_state():
+    """すでに収穫した投稿のid。
+
+    当初は /{media_id}/replies で「自分が返信済みか」を見ていたが、この
+    アプリは返信を読む権限が無く(Application does not have permission)、
+    常に「確認できない=投稿しない」に倒れて一度も動かなかった。
+    そのため、収穫した投稿のidをリポジトリのファイルに残す方式に変えた。
+    """
     try:
-        d = api("GET", f"{media_id}/replies", {"fields": "username", "access_token": token})
-    except SystemExit:
-        return True  # 確認できないときは安全側(足さない)
-    return any(r.get("username") == me for r in d.get("data", []))
+        with open(STATE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    with open(STATE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
 
 
 def publish_reply(user_id, token, text, reply_to_id):
@@ -90,7 +105,7 @@ def main():
         print("harvest を持つ投稿がありません")
         return
 
-    me = api("GET", "me", {"fields": "username", "access_token": token}).get("username")
+    state = load_state()
     now = datetime.now(JST)
     mine = api("GET", f"{user_id}/threads",
                {"fields": "id,text,timestamp,permalink", "limit": 50, "access_token": token})
@@ -106,13 +121,12 @@ def main():
         ts = datetime.fromisoformat(m["timestamp"].replace("+0000", "+00:00")).astimezone(JST)
         if (now - ts).days > LOOKBACK_DAYS:
             continue
-        v = views_of(m["id"], token)
         head = body.split("\n", 1)[0][:24]
+        if m["id"] in state:
+            continue  # 収穫済み
+        v = views_of(m["id"], token)
         if v is None or v < threshold:
             print(f"見送り {ts:%m-%d %H:%M} {v}表示 (基準{threshold}) 「{head}」")
-            continue
-        if already_replied(m["id"], token, me):
-            print(f"済み   {ts:%m-%d %H:%M} {v}表示 すでに返信あり 「{head}」")
             continue
 
         if disclosure and disclosure not in reply:
@@ -126,6 +140,9 @@ def main():
             print("DRY_RUN=1 のため投稿しません")
             continue
         rid = publish_reply(user_id, token, reply, m["id"])
+        state[m["id"]] = {"at": now.isoformat(timespec="seconds"), "views": v,
+                          "reply_id": rid, "head": head}
+        save_state(state)
         print(f"返信しました: id={rid}")
         done += 1
 
